@@ -831,7 +831,49 @@ Do not use this on huge lists unless you really need it:
 It can create a large `proxy_logs/` directory.
 
 ---
+# UPDATE
 
+## Sort configurations by ping
+
+`proxy_probe.py` supports `--sort-ping` for ordering configurations by latency.
+
+### Full proxy test + sorted output
+
+Use this when you want to run a normal proxy test first, then save the working/selected configurations sorted from fastest to slowest.
+
+```bash
+python3 proxy_probe.py --mode balanced -f configs.txt --sort-ping --output sorted.txt
+```
+
+Behavior:
+
+* Runs the selected test mode normally.
+* Writes only selected/working configurations to the output file.
+* Sorts the output by the best measured latency available.
+
+### Ping-only sorting without `--mode`
+
+If `--sort-ping` is used without `--mode`, the script does not run a full proxy test. Instead, it quickly checks TCP reachability to each configuration server/port and sorts the whole list by ping.
+
+```bash
+python3 proxy_probe.py -f configs.txt --sort-ping --ping-timeout 5 --output sorted.txt
+```
+
+Example output:
+
+```text
+output file sorted sorted.txt
+from 600th configuration, configs connections dies because of timeout :(
+```
+
+Notes:
+
+* Ping-only mode is a fast reachability check, not a full proxy tunnel validation.
+* A config can respond to TCP ping but still fail the full proxy test.
+* For reliable filtering, use `--mode balanced --sort-ping`.
+* For quick large-list ordering, use `--sort-ping` without `--mode`.
+
+---
 ## Help
 
 Show all options:

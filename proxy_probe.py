@@ -15,7 +15,7 @@ Design goals:
 
 from __future__ import annotations
 
-VERSION = "2026-06-01-proxy-name-fix"
+VERSION = "2026-06-09-sort-ping"
 
 import argparse
 import asyncio
@@ -42,6 +42,7 @@ from urllib.parse import parse_qsl, unquote, urlparse
 try:
     import aiohttp
     from aiohttp_socks import ProxyConnector
+
     IMPORT_ERROR: Optional[BaseException] = None
 except ImportError as exc:  # keep --help usable even when runtime deps are missing
     aiohttp = None  # type: ignore[assignment]
@@ -244,6 +245,9 @@ class AppConfig:
     test_urls: list[str]
     slow_threshold_ms: float
     append: bool
+    sort_ping: bool
+    sort_ping_only: bool
+    ping_timeout: float
 
 
 @dataclass
@@ -396,8 +400,12 @@ class TestResult:
             "resolved_ips": ";".join(self.dns.resolved_ips),
             "endpoint_used": self.endpoint_used,
             "endpoint_success_count": self.http.success_count if self.http else "",
-            "stage2_stability_success_count": self.stage2.stability_success_count if self.stage2 else "",
-            "stage2_avg_latency_ms": fmt_ms(self.stage2.avg_latency_ms if self.stage2 else None),
+            "stage2_stability_success_count": self.stage2.stability_success_count
+            if self.stage2
+            else "",
+            "stage2_avg_latency_ms": fmt_ms(
+                self.stage2.avg_latency_ms if self.stage2 else None
+            ),
             "log_file": self.log_file,
         }
 
@@ -545,7 +553,9 @@ def parse_host_port(host_port: str, default_port: int = 443) -> tuple[str, int]:
 
 
 def parse_query(query: str) -> dict[str, str]:
-    return dict(parse_qsl(query, keep_blank_values=True, encoding="utf-8", errors="replace"))
+    return dict(
+        parse_qsl(query, keep_blank_values=True, encoding="utf-8", errors="replace")
+    )
 
 
 # ---------- parsing ----------
@@ -582,7 +592,9 @@ def parse_ss_url(proxy_url: str) -> dict[str, Any]:
             raise ProxyParseError("Shadowsocks payload missing @host:port")
         creds, host_port = decoded.rsplit("@", 1)
         if ":" not in creds:
-            raise ProxyParseError("Shadowsocks decoded credentials must be method:password")
+            raise ProxyParseError(
+                "Shadowsocks decoded credentials must be method:password"
+            )
         method, password = creds.split(":", 1)
         host, port = parse_host_port(host_port)
 
@@ -613,7 +625,9 @@ def parse_vmess_url(proxy_url: str) -> dict[str, Any]:
         decoded = b64_decode_urlsafe(b64_part).decode("utf-8")
         data = json.loads(decoded)
     except Exception as exc:
-        raise ProxyParseError(f"invalid VMess base64/json payload: {type(exc).__name__}: {exc}") from exc
+        raise ProxyParseError(
+            f"invalid VMess base64/json payload: {type(exc).__name__}: {exc}"
+        ) from exc
 
     network = normalize_v2_network(data.get("net") or data.get("type") or "tcp")
     try:
@@ -690,7 +704,9 @@ def parse_vless_or_trojan_url(proxy_url: str) -> dict[str, Any]:
         "network": network,
         "security": security,
         "params": params,
-        "tag": unquote(parsed.fragment, encoding="utf-8", errors="replace") if parsed.fragment else "",
+        "tag": unquote(parsed.fragment, encoding="utf-8", errors="replace")
+        if parsed.fragment
+        else "",
         "sni": params.get("sni") or params.get("serverName") or "",
         "alpn": params.get("alpn", ""),
         "fp": params.get("fp", ""),
@@ -753,7 +769,9 @@ def build_tls_or_reality_settings(parsed: dict[str, Any]) -> dict[str, Any]:
             tls_settings["serverName"] = server_name
         alpn = parsed.get("alpn")
         if alpn:
-            tls_settings["alpn"] = [x.strip() for x in str(alpn).split(",") if x.strip()]
+            tls_settings["alpn"] = [
+                x.strip() for x in str(alpn).split(",") if x.strip()
+            ]
         fp = parsed.get("fp")
         if fp:
             tls_settings["fingerprint"] = fp
@@ -777,14 +795,19 @@ def build_tls_or_reality_settings(parsed: dict[str, Any]) -> dict[str, Any]:
     return stream_settings
 
 
-def attach_transport_settings(stream_settings: dict[str, Any], parsed: dict[str, Any]) -> None:
+def attach_transport_settings(
+    stream_settings: dict[str, Any], parsed: dict[str, Any]
+) -> None:
     network = parsed.get("network", "tcp")
 
     if network == "ws":
         headers = {}
         if parsed.get("host_header"):
             headers["Host"] = parsed["host_header"]
-        stream_settings["wsSettings"] = {"path": parsed.get("path", "") or "/", "headers": headers}
+        stream_settings["wsSettings"] = {
+            "path": parsed.get("path", "") or "/",
+            "headers": headers,
+        }
 
     elif network == "grpc":
         grpc_settings: dict[str, Any] = {}
@@ -822,8 +845,13 @@ def attach_transport_settings(stream_settings: dict[str, Any], parsed: dict[str,
     elif network == "h2":
         hosts: list[str] = []
         if parsed.get("host_header"):
-            hosts = [x.strip() for x in str(parsed["host_header"]).split(",") if x.strip()]
-        stream_settings["httpSettings"] = {"path": parsed.get("path", "") or "/", "host": hosts}
+            hosts = [
+                x.strip() for x in str(parsed["host_header"]).split(",") if x.strip()
+            ]
+        stream_settings["httpSettings"] = {
+            "path": parsed.get("path", "") or "/",
+            "host": hosts,
+        }
 
     elif network == "kcp":
         kcp_settings: dict[str, Any] = {}
@@ -844,7 +872,9 @@ def attach_transport_settings(stream_settings: dict[str, Any], parsed: dict[str,
         stream_settings["quicSettings"] = quic_settings
 
 
-def generate_xray_config(parsed: dict[str, Any], local_port: int, debug: bool) -> dict[str, Any]:
+def generate_xray_config(
+    parsed: dict[str, Any], local_port: int, debug: bool
+) -> dict[str, Any]:
     proxy_type = parsed["type"]
 
     if proxy_type == "vless":
@@ -859,7 +889,11 @@ def generate_xray_config(parsed: dict[str, Any], local_port: int, debug: bool) -
                             {
                                 "id": parsed["id"],
                                 "encryption": "none",
-                                **({"flow": parsed["flow"]} if parsed.get("flow") else {}),
+                                **(
+                                    {"flow": parsed["flow"]}
+                                    if parsed.get("flow")
+                                    else {}
+                                ),
                             }
                         ],
                     }
@@ -951,7 +985,9 @@ def write_json_config(config: dict[str, Any], prefix: str) -> str:
     return path
 
 
-def build_client(parsed: dict[str, Any], local_port: int, cfg: AppConfig) -> tuple[list[str], str]:
+def build_client(
+    parsed: dict[str, Any], local_port: int, cfg: AppConfig
+) -> tuple[list[str], str]:
     proxy_type = parsed["type"]
     if proxy_type in {"vless", "vmess", "trojan"}:
         config = generate_xray_config(parsed, local_port, cfg.debug)
@@ -1008,9 +1044,18 @@ async def resolve_host(host: str, port: int) -> DNSInfo:
     started = now_perf()
     try:
         ips, families = await asyncio.to_thread(_resolve_sync, host, port)
-        return DNSInfo(host=host, resolved_ips=ips, families=families, dns_time_ms=ms_since(started))
+        return DNSInfo(
+            host=host,
+            resolved_ips=ips,
+            families=families,
+            dns_time_ms=ms_since(started),
+        )
     except Exception as exc:
-        return DNSInfo(host=host, dns_time_ms=ms_since(started), error=f"{type(exc).__name__}: {exc}")
+        return DNSInfo(
+            host=host,
+            dns_time_ms=ms_since(started),
+            error=f"{type(exc).__name__}: {exc}",
+        )
 
 
 # ---------- process handling ----------
@@ -1047,7 +1092,9 @@ async def capture_process_output(
     try:
         if per_proxy_log_file:
             Path(per_proxy_log_file).parent.mkdir(parents=True, exist_ok=True)
-            fh = open(per_proxy_log_file, "a", encoding="utf-8", errors="replace", newline="")
+            fh = open(
+                per_proxy_log_file, "a", encoding="utf-8", errors="replace", newline=""
+            )
         while True:
             chunk = await process.stdout.readline()
             if not chunk:
@@ -1063,10 +1110,18 @@ async def capture_process_output(
                 fh.close()
 
 
-async def launch_client(client_cmd: list[str], ctx: ProxyTestContext, logger: logging.Logger) -> asyncio.subprocess.Process:
+async def launch_client(
+    client_cmd: list[str], ctx: ProxyTestContext, logger: logging.Logger
+) -> asyncio.subprocess.Process:
     if ctx.per_proxy_log_file:
         Path(ctx.per_proxy_log_file).parent.mkdir(parents=True, exist_ok=True)
-        with open(ctx.per_proxy_log_file, "a", encoding="utf-8", errors="replace", newline="\n") as log_fh:
+        with open(
+            ctx.per_proxy_log_file,
+            "a",
+            encoding="utf-8",
+            errors="replace",
+            newline="\n",
+        ) as log_fh:
             log_fh.write(f"\n--- launching: {' '.join(client_cmd)} ---\n")
 
     logger.debug("[%s] launching client: %s", ctx.proxy_id, " ".join(client_cmd))
@@ -1133,7 +1188,9 @@ async def wait_for_local_socks_ready(
             )
 
         try:
-            _reader, writer = await asyncio.wait_for(asyncio.open_connection(host, port), timeout=0.75)
+            _reader, writer = await asyncio.wait_for(
+                asyncio.open_connection(host, port), timeout=0.75
+            )
             writer.close()
             await writer.wait_closed()
             return SocksReadyResult(
@@ -1234,7 +1291,12 @@ async def test_single_endpoint(
                     status=resp.status,
                     error=f"response validation failed; could not extract IP; body={snippet!r}",
                 )
-            if not require_ip and resp.status == 200 and not observed_ip and not text.strip():
+            if (
+                not require_ip
+                and resp.status == 200
+                and not observed_ip
+                and not text.strip()
+            ):
                 return EndpointResult(
                     endpoint=endpoint,
                     success=False,
@@ -1279,9 +1341,13 @@ async def run_http_tests_through_socks(
     require_ip = cfg.mode in {Mode.STRICT, Mode.DIAGNOSE}
     verify_ssl = cfg.mode in {Mode.STRICT, Mode.DIAGNOSE}
 
-    async with aiohttp.ClientSession(connector=connector, timeout=timeout, trust_env=False) as session:
+    async with aiohttp.ClientSession(
+        connector=connector, timeout=timeout, trust_env=False
+    ) as session:
         for endpoint in cfg.test_urls:
-            result = await test_single_endpoint(session, endpoint, require_ip=require_ip, verify_ssl=verify_ssl)
+            result = await test_single_endpoint(
+                session, endpoint, require_ip=require_ip, verify_ssl=verify_ssl
+            )
             endpoint_results.append(result)
             if result.success:
                 logger.debug(
@@ -1327,8 +1393,13 @@ async def run_http_tests_through_socks(
         )
 
     errors = [r.error for r in endpoint_results if r.error]
-    any_timeout = any("TimeoutError" in r.error or "timeout" in r.error.lower() for r in endpoint_results)
-    any_validation_failure = any("response validation failed" in r.error for r in endpoint_results)
+    any_timeout = any(
+        "TimeoutError" in r.error or "timeout" in r.error.lower()
+        for r in endpoint_results
+    )
+    any_validation_failure = any(
+        "response validation failed" in r.error for r in endpoint_results
+    )
     any_transport_error = any(r.status is None and r.error for r in endpoint_results)
     last_error = errors[-1] if errors else "all endpoints failed"
 
@@ -1417,12 +1488,19 @@ async def stage2_multi_domain(local_port: int) -> tuple[bool, str, int, int]:
                     failures.append(f"{url} {type(exc).__name__}: {exc}")
         ok = success_count >= 1
         if ok:
-            reason = f"multi_domain_success={success_count}/{len(STAGE2_MULTI_DOMAIN_URLS)}"
+            reason = (
+                f"multi_domain_success={success_count}/{len(STAGE2_MULTI_DOMAIN_URLS)}"
+            )
         else:
             reason = " | ".join(failures[:3]) or "no domain succeeded"
         return ok, reason, success_count, len(STAGE2_MULTI_DOMAIN_URLS)
     except Exception as exc:
-        return False, f"{type(exc).__name__}: {exc}", success_count, len(STAGE2_MULTI_DOMAIN_URLS)
+        return (
+            False,
+            f"{type(exc).__name__}: {exc}",
+            success_count,
+            len(STAGE2_MULTI_DOMAIN_URLS),
+        )
 
 
 async def stage2_stability(local_port: int) -> tuple[bool, str, int, Optional[float]]:
@@ -1444,7 +1522,12 @@ async def stage2_stability(local_port: int) -> tuple[bool, str, int, Optional[fl
                     pass
         avg_latency = sum(latencies) / len(latencies) if latencies else None
         if success_count < STAGE2_MIN_STABILITY_SUCCESSES:
-            return False, f"success_count={success_count}/{STAGE2_STABILITY_ROUNDS}", success_count, avg_latency
+            return (
+                False,
+                f"success_count={success_count}/{STAGE2_STABILITY_ROUNDS}",
+                success_count,
+                avg_latency,
+            )
         return True, "stability_ok", success_count, avg_latency
     except Exception as exc:
         return False, f"{type(exc).__name__}: {exc}", success_count, None
@@ -1456,12 +1539,16 @@ async def run_stage2_checks(local_port: int) -> Stage2CheckResult:
 
     result.dns_ok, result.dns_reason = await stage2_dns_over_proxy(local_port)
     result.https_ok, result.https_reason, https_latency = await stage2_https(local_port)
-    multi_ok, multi_reason, multi_count, multi_total = await stage2_multi_domain(local_port)
+    multi_ok, multi_reason, multi_count, multi_total = await stage2_multi_domain(
+        local_port
+    )
     result.multi_domain_ok = multi_ok
     result.multi_domain_reason = multi_reason
     result.multi_domain_success_count = multi_count
     result.multi_domain_total = multi_total
-    stability_ok, stability_reason, success_count, avg_latency = await stage2_stability(local_port)
+    stability_ok, stability_reason, success_count, avg_latency = await stage2_stability(
+        local_port
+    )
     result.stability_ok = stability_ok
     result.stability_reason = stability_reason
     result.stability_success_count = success_count
@@ -1481,13 +1568,41 @@ class ClientDiagnostic:
 
 
 CLIENT_LOG_PATTERNS: list[tuple[FailureCategory, str, str]] = [
-    (FailureCategory.REALITY_ERROR, r"(?i)(reality.*(fail|error|invalid)|public\s*key|short\s*id|shortid|spiderx)", "Reality configuration/startup error"),
-    (FailureCategory.TLS_ERROR, r"(?i)(tls.*handshake|handshake.*tls|x509|certificate|first record does not look like a tls handshake)", "TLS handshake/certificate error"),
-    (FailureCategory.DNS_ERROR, r"(?i)(no such host|dns.*(fail|error)|server misbehaving|lookup .+ failed)", "client-side DNS error"),
-    (FailureCategory.TIMEOUT_ERROR, r"(?i)(i/o timeout|dial timeout|context deadline exceeded|deadline exceeded|operation timed out|connect timeout)", "dial/connect timeout"),
-    (FailureCategory.HTTP_ERROR, r"(?i)(connection refused|connection reset|broken pipe|server disconnected|unexpected eof)", "remote connection error"),
-    (FailureCategory.SOCKS_ERROR, r"(?i)(address already in use|failed to listen|bind:|listen tcp)", "local SOCKS/listen error"),
-    (FailureCategory.CLIENT_START_ERROR, r"(?i)(failed to start|panic:|fatal|permission denied|exec format error|unknown command|invalid config)", "client startup/config error"),
+    (
+        FailureCategory.REALITY_ERROR,
+        r"(?i)(reality.*(fail|error|invalid)|public\s*key|short\s*id|shortid|spiderx)",
+        "Reality configuration/startup error",
+    ),
+    (
+        FailureCategory.TLS_ERROR,
+        r"(?i)(tls.*handshake|handshake.*tls|x509|certificate|first record does not look like a tls handshake)",
+        "TLS handshake/certificate error",
+    ),
+    (
+        FailureCategory.DNS_ERROR,
+        r"(?i)(no such host|dns.*(fail|error)|server misbehaving|lookup .+ failed)",
+        "client-side DNS error",
+    ),
+    (
+        FailureCategory.TIMEOUT_ERROR,
+        r"(?i)(i/o timeout|dial timeout|context deadline exceeded|deadline exceeded|operation timed out|connect timeout)",
+        "dial/connect timeout",
+    ),
+    (
+        FailureCategory.HTTP_ERROR,
+        r"(?i)(connection refused|connection reset|broken pipe|server disconnected|unexpected eof)",
+        "remote connection error",
+    ),
+    (
+        FailureCategory.SOCKS_ERROR,
+        r"(?i)(address already in use|failed to listen|bind:|listen tcp)",
+        "local SOCKS/listen error",
+    ),
+    (
+        FailureCategory.CLIENT_START_ERROR,
+        r"(?i)(failed to start|panic:|fatal|permission denied|exec format error|unknown command|invalid config)",
+        "client startup/config error",
+    ),
 ]
 
 
@@ -1499,7 +1614,9 @@ def classify_client_log_text(text: str) -> Optional[ClientDiagnostic]:
         regex = re.compile(pattern)
         for line in reversed(lines):
             if regex.search(line):
-                return ClientDiagnostic(category=category, reason=reason, matched_line=line[-500:])
+                return ClientDiagnostic(
+                    category=category, reason=reason, matched_line=line[-500:]
+                )
     return None
 
 
@@ -1511,7 +1628,9 @@ def enhance_failure_from_client_log(
     diagnostic = classify_client_log_text(text)
     if diagnostic is None:
         return category, reason
-    enhanced_reason = f"{reason} | client_log={diagnostic.reason}: {diagnostic.matched_line}"
+    enhanced_reason = (
+        f"{reason} | client_log={diagnostic.reason}: {diagnostic.matched_line}"
+    )
     return diagnostic.category, enhanced_reason
 
 
@@ -1528,13 +1647,30 @@ def selected_for_output(mode: Mode, classification: Classification) -> bool:
     return classification in CONNECTED_CLASSES
 
 
-def classify_after_http(ctx: ProxyTestContext, http: HTTPStageResult) -> tuple[Classification, FailureCategory, str, Stage]:
+def classify_after_http(
+    ctx: ProxyTestContext, http: HTTPStageResult
+) -> tuple[Classification, FailureCategory, str, Stage]:
     if http.success:
         if http.elapsed_ms > ctx.cfg.slow_threshold_ms:
-            return Classification.SLOW_BUT_WORKING, FailureCategory.UNKNOWN_ERROR, "", Stage.RESPONSE_VALIDATION
+            return (
+                Classification.SLOW_BUT_WORKING,
+                FailureCategory.UNKNOWN_ERROR,
+                "",
+                Stage.RESPONSE_VALIDATION,
+            )
         if ctx.cfg.mode == Mode.DIAGNOSE and http.failure_count > 0:
-            return Classification.PARTIAL, FailureCategory.UNKNOWN_ERROR, "", Stage.RESPONSE_VALIDATION
-        return Classification.GOOD, FailureCategory.UNKNOWN_ERROR, "", Stage.RESPONSE_VALIDATION
+            return (
+                Classification.PARTIAL,
+                FailureCategory.UNKNOWN_ERROR,
+                "",
+                Stage.RESPONSE_VALIDATION,
+            )
+        return (
+            Classification.GOOD,
+            FailureCategory.UNKNOWN_ERROR,
+            "",
+            Stage.RESPONSE_VALIDATION,
+        )
 
     reason = http.reason or "all endpoints failed"
     category = http.category
@@ -1543,10 +1679,14 @@ def classify_after_http(ctx: ProxyTestContext, http: HTTPStageResult) -> tuple[C
     return Classification.UNKNOWN, category, reason, http.stage
 
 
-def classify_after_stage2(ctx: ProxyTestContext, http: HTTPStageResult, stage2: Stage2CheckResult) -> tuple[Classification, FailureCategory, str, Stage]:
+def classify_after_stage2(
+    ctx: ProxyTestContext, http: HTTPStageResult, stage2: Stage2CheckResult
+) -> tuple[Classification, FailureCategory, str, Stage]:
     # This is deliberately soft. Stage2 failures after a basic HTTP success mean
     # partial/slow/unstable, not automatically dead.
-    avg_latency = stage2.avg_latency_ms if stage2.avg_latency_ms is not None else http.elapsed_ms
+    avg_latency = (
+        stage2.avg_latency_ms if stage2.avg_latency_ms is not None else http.elapsed_ms
+    )
 
     if (
         stage2.https_ok
@@ -1554,10 +1694,23 @@ def classify_after_stage2(ctx: ProxyTestContext, http: HTTPStageResult, stage2: 
         and stage2.stability_success_count >= STAGE2_MIN_STABILITY_SUCCESSES
     ):
         if avg_latency > ctx.cfg.slow_threshold_ms:
-            return Classification.SLOW_BUT_WORKING, FailureCategory.UNKNOWN_ERROR, "", Stage.STAGE2_STABILITY
-        return Classification.GOOD, FailureCategory.UNKNOWN_ERROR, "", Stage.STAGE2_STABILITY
+            return (
+                Classification.SLOW_BUT_WORKING,
+                FailureCategory.UNKNOWN_ERROR,
+                "",
+                Stage.STAGE2_STABILITY,
+            )
+        return (
+            Classification.GOOD,
+            FailureCategory.UNKNOWN_ERROR,
+            "",
+            Stage.STAGE2_STABILITY,
+        )
 
-    if stage2.stability_success_count > 0 and stage2.stability_success_count < STAGE2_MIN_STABILITY_SUCCESSES:
+    if (
+        stage2.stability_success_count > 0
+        and stage2.stability_success_count < STAGE2_MIN_STABILITY_SUCCESSES
+    ):
         return (
             Classification.UNSTABLE,
             FailureCategory.UNKNOWN_ERROR,
@@ -1620,7 +1773,9 @@ class OutputManager:
         self._lock = asyncio.Lock()
         mode = "a" if cfg.append else "w"
         cfg.output.parent.mkdir(parents=True, exist_ok=True)
-        self._output_fh = open(cfg.output, mode, encoding="utf-8", errors="replace", newline="\n")
+        self._output_fh = open(
+            cfg.output, mode, encoding="utf-8", errors="replace", newline="\n"
+        )
         self._failed_fh = self._open_optional(cfg.save_failed, mode)
         self._unknown_fh = self._open_optional(cfg.save_unknown, mode)
         self._jsonl_fh = self._open_optional(cfg.jsonl_path, mode)
@@ -1630,8 +1785,12 @@ class OutputManager:
 
         if cfg.csv_path:
             cfg.csv_path.parent.mkdir(parents=True, exist_ok=True)
-            csv_exists = cfg.append and cfg.csv_path.exists() and cfg.csv_path.stat().st_size > 0
-            self._csv_fh = open(cfg.csv_path, mode, encoding="utf-8", errors="replace", newline="")
+            csv_exists = (
+                cfg.append and cfg.csv_path.exists() and cfg.csv_path.stat().st_size > 0
+            )
+            self._csv_fh = open(
+                cfg.csv_path, mode, encoding="utf-8", errors="replace", newline=""
+            )
             self._csv_writer = csv.DictWriter(self._csv_fh, fieldnames=CSV_COLUMNS)
             if not csv_exists:
                 self._csv_writer.writeheader()
@@ -1642,7 +1801,9 @@ class OutputManager:
             bucket_dir.mkdir(parents=True, exist_ok=True)
             for classification in Classification:
                 path = bucket_dir / f"{classification.value.lower()}.txt"
-                self._bucket_fhs[classification] = open(path, mode, encoding="utf-8", errors="replace", newline="\n")
+                self._bucket_fhs[classification] = open(
+                    path, mode, encoding="utf-8", errors="replace", newline="\n"
+                )
 
     def _open_optional(self, path: Optional[Path], mode: str):
         if path is None:
@@ -1652,12 +1813,15 @@ class OutputManager:
 
     async def write_result(self, result: TestResult) -> None:
         async with self._lock:
-            if result.selected:
+            if result.selected and not self.cfg.sort_ping:
                 self._output_fh.write(result.proxy + "\n")
                 self._output_fh.flush()
                 self._maybe_fsync(self._output_fh)
 
-            if self._failed_fh and result.classification in {Classification.DEAD, Classification.PARSE_FAILED}:
+            if self._failed_fh and result.classification in {
+                Classification.DEAD,
+                Classification.PARSE_FAILED,
+            }:
                 self._failed_fh.write(result.proxy + "\n")
                 self._failed_fh.flush()
                 self._maybe_fsync(self._failed_fh)
@@ -1674,7 +1838,9 @@ class OutputManager:
                 self._maybe_fsync(bucket)
 
             if self._jsonl_fh:
-                self._jsonl_fh.write(json.dumps(result.to_json_dict(), ensure_ascii=False) + "\n")
+                self._jsonl_fh.write(
+                    json.dumps(result.to_json_dict(), ensure_ascii=False) + "\n"
+                )
                 self._jsonl_fh.flush()
                 self._maybe_fsync(self._jsonl_fh)
 
@@ -1690,7 +1856,13 @@ class OutputManager:
             os.fsync(fh.fileno())
 
     def close(self) -> None:
-        handles = [self._output_fh, self._failed_fh, self._unknown_fh, self._jsonl_fh, self._csv_fh]
+        handles = [
+            self._output_fh,
+            self._failed_fh,
+            self._unknown_fh,
+            self._jsonl_fh,
+            self._csv_fh,
+        ]
         handles.extend(self._bucket_fhs.values())
         for fh in handles:
             if fh:
@@ -1742,9 +1914,16 @@ def setup_file_logger(cfg: AppConfig) -> logging.Logger:
     logger.propagate = False
     if cfg.log_file:
         cfg.log_file.parent.mkdir(parents=True, exist_ok=True)
-        handler = logging.FileHandler(cfg.log_file, mode="a" if cfg.append else "w", encoding="utf-8", errors="replace")
+        handler = logging.FileHandler(
+            cfg.log_file,
+            mode="a" if cfg.append else "w",
+            encoding="utf-8",
+            errors="replace",
+        )
         handler.setLevel(logging.DEBUG)
-        handler.setFormatter(logging.Formatter("%(asctime)s | %(levelname)-8s | %(message)s"))
+        handler.setFormatter(
+            logging.Formatter("%(asctime)s | %(levelname)-8s | %(message)s")
+        )
         logger.addHandler(handler)
     else:
         logger.addHandler(logging.NullHandler())
@@ -1770,14 +1949,20 @@ class ConsoleReporter:
         if not self.enabled:
             return
         tag = self.color(" START ", "white_on_blue")
+        run_mode = "ping-only" if self.cfg.sort_ping_only else self.cfg.mode.value
         print(
-            f"{tag} mode={self.cfg.mode.value} total={total} threads={self.cfg.threads} "
+            f"{tag} mode={run_mode} total={total} threads={self.cfg.threads} "
             f"output={self.cfg.output} summary={self.cfg.summary_path} log_file={self.cfg.log_file or 'disabled'}",
             file=sys.stderr,
             flush=True,
         )
 
-    def progress(self, stats: "ProgressStats", last_result: Optional[TestResult] = None, force: bool = False) -> None:
+    def progress(
+        self,
+        stats: "ProgressStats",
+        last_result: Optional[TestResult] = None,
+        force: bool = False,
+    ) -> None:
         if not self.enabled:
             return
         if not force and stats.done == self._last_progress_done:
@@ -1811,7 +1996,10 @@ class ConsoleReporter:
         if not self.enabled:
             return
         # Avoid flooding huge runs. Show selected/connected results and occasional important failures.
-        if not result.selected and result.classification not in {Classification.UNKNOWN, Classification.PARSE_FAILED}:
+        if not result.selected and result.classification not in {
+            Classification.UNKNOWN,
+            Classification.PARSE_FAILED,
+        }:
             return
         tag = self.classification(result.classification)
         latency = fmt_ms(result.latencies.total_time_ms) or "?"
@@ -1835,7 +2023,10 @@ class ConsoleReporter:
         )
         if summary.get("top_failure_categories"):
             tag2 = self.color(" TOP FAILURES ", "white_on_magenta")
-            cats = ", ".join(f"{k}={v}" for k, v in list(summary["top_failure_categories"].items())[:5])
+            cats = ", ".join(
+                f"{k}={v}"
+                for k, v in list(summary["top_failure_categories"].items())[:5]
+            )
             print(f"{tag2} {cats}", file=sys.stderr, flush=True)
 
 
@@ -1852,7 +2043,9 @@ class ProgressStats:
     unknown: int = 0
     active: int = 0
     total_latency_ms: float = 0.0
-    class_counts: dict[Classification, int] = field(default_factory=lambda: defaultdict(int))
+    class_counts: dict[Classification, int] = field(
+        default_factory=lambda: defaultdict(int)
+    )
     category_counts: Counter[str] = field(default_factory=Counter)
     reason_counts: Counter[str] = field(default_factory=Counter)
     started: float = field(default_factory=now_perf)
@@ -1910,7 +2103,9 @@ def make_result(
         selected=selected,
         connected=connected,
         stage=stage,
-        failure_category="" if category == FailureCategory.UNKNOWN_ERROR and not reason else category.value,
+        failure_category=""
+        if category == FailureCategory.UNKNOWN_ERROR and not reason
+        else category.value,
         failure_reason=reason,
         local_port=ctx.local_port,
         dns=ctx.dns,
@@ -1949,17 +2144,32 @@ async def test_proxy_once(
 
         if cfg.per_proxy_logs:
             cfg.proxy_log_dir.mkdir(parents=True, exist_ok=True)
-            ctx.per_proxy_log_file = str(cfg.proxy_log_dir / f"{ctx.index:06d}_{ctx.proxy_type}_{ctx.proxy_id}.log")
+            ctx.per_proxy_log_file = str(
+                cfg.proxy_log_dir
+                / f"{ctx.index:06d}_{ctx.proxy_type}_{ctx.proxy_id}.log"
+            )
 
         # Optional local DNS diagnostics. DNS failure is recorded but not fatal.
         if MODE_DEFAULTS[cfg.mode].run_local_dns:
             ctx.set_stage(Stage.DNS_RESOLUTION)
-            ctx.dns = await resolve_host(str(ctx.parsed["host"]), int(ctx.parsed["port"]))
+            ctx.dns = await resolve_host(
+                str(ctx.parsed["host"]), int(ctx.parsed["port"])
+            )
             ctx.latencies.dns_time_ms = ctx.dns.dns_time_ms
             if ctx.dns.error:
-                logger.info("[%s] local DNS failed host=%s error=%s", ctx.proxy_id, ctx.dns.host, ctx.dns.error)
+                logger.info(
+                    "[%s] local DNS failed host=%s error=%s",
+                    ctx.proxy_id,
+                    ctx.dns.host,
+                    ctx.dns.error,
+                )
             else:
-                logger.debug("[%s] local DNS host=%s ips=%s", ctx.proxy_id, ctx.dns.host, ctx.dns.resolved_ips)
+                logger.debug(
+                    "[%s] local DNS host=%s ips=%s",
+                    ctx.proxy_id,
+                    ctx.dns.host,
+                    ctx.dns.resolved_ips,
+                )
 
         # BUILD_CONFIG
         ctx.set_stage(Stage.BUILD_CONFIG)
@@ -2003,17 +2213,27 @@ async def test_proxy_once(
                 reason=f"failed to start client: {type(exc).__name__}: {exc}",
             )
 
-        ctx.capture_task = asyncio.create_task(capture_process_output(ctx.process, log_buffer, ctx.per_proxy_log_file))
+        ctx.capture_task = asyncio.create_task(
+            capture_process_output(ctx.process, log_buffer, ctx.per_proxy_log_file)
+        )
         ctx.latencies.startup_time_ms = ms_since(startup_start)
 
         # WAIT_FOR_LOCAL_SOCKS
         ctx.set_stage(Stage.WAIT_FOR_LOCAL_SOCKS)
-        socks_result = await wait_for_local_socks_ready(ctx.process, LOCAL_HOST, ctx.local_port, cfg.startup_timeout)
+        socks_result = await wait_for_local_socks_ready(
+            ctx.process, LOCAL_HOST, ctx.local_port, cfg.startup_timeout
+        )
         ctx.latencies.socks_ready_time_ms = socks_result.elapsed_ms
         if not socks_result.ready:
             await finish_capture_task(ctx.capture_task)
-            category, reason = enhance_failure_from_client_log(log_buffer.text(), socks_result.category, socks_result.reason)
-            classification = Classification.UNKNOWN if category == FailureCategory.TIMEOUT_ERROR else Classification.DEAD
+            category, reason = enhance_failure_from_client_log(
+                log_buffer.text(), socks_result.category, socks_result.reason
+            )
+            classification = (
+                Classification.UNKNOWN
+                if category == FailureCategory.TIMEOUT_ERROR
+                else Classification.DEAD
+            )
             ctx.latencies.total_time_ms = ms_since(started_total)
             return make_result(
                 ctx,
@@ -2035,24 +2255,50 @@ async def test_proxy_once(
 
         if not http.success:
             await finish_capture_task(ctx.capture_task)
-            category, reason = enhance_failure_from_client_log(log_buffer.text(), http.category, http.reason)
+            category, reason = enhance_failure_from_client_log(
+                log_buffer.text(), http.category, http.reason
+            )
             # If SOCKS opened but all HTTP tests fail, classify UNKNOWN by default; it may be endpoint/network instability.
             classification = Classification.UNKNOWN
             ctx.latencies.total_time_ms = ms_since(started_total)
-            return make_result(ctx, classification=classification, stage=http.stage, category=category, reason=reason, http=http)
+            return make_result(
+                ctx,
+                classification=classification,
+                stage=http.stage,
+                category=category,
+                reason=reason,
+                http=http,
+            )
 
         # Optional strict Stage2 checks
         if MODE_DEFAULTS[cfg.mode].run_stage2:
             ctx.set_stage(Stage.STAGE2_DNS_OVER_PROXY)
             stage2 = await run_stage2_checks(ctx.local_port)
             ctx.latencies.stage2_time_ms = stage2.elapsed_ms
-            classification, category, reason, stage = classify_after_stage2(ctx, http, stage2)
+            classification, category, reason, stage = classify_after_stage2(
+                ctx, http, stage2
+            )
             ctx.latencies.total_time_ms = ms_since(started_total)
-            return make_result(ctx, classification=classification, stage=stage, category=category, reason=reason, http=http, stage2=stage2)
+            return make_result(
+                ctx,
+                classification=classification,
+                stage=stage,
+                category=category,
+                reason=reason,
+                http=http,
+                stage2=stage2,
+            )
 
         classification, category, reason, stage = classify_after_http(ctx, http)
         ctx.latencies.total_time_ms = ms_since(started_total)
-        return make_result(ctx, classification=classification, stage=stage, category=category, reason=reason, http=http)
+        return make_result(
+            ctx,
+            classification=classification,
+            stage=stage,
+            category=category,
+            reason=reason,
+            http=http,
+        )
 
     except asyncio.CancelledError:
         raise
@@ -2083,7 +2329,9 @@ async def test_proxy_with_timeout(
     logger: logging.Logger,
 ) -> TestResult:
     started = now_perf()
-    ctx = ProxyTestContext(index=index, total=total, proxy=proxy, proxy_id=short_proxy_id(proxy), cfg=cfg)
+    ctx = ProxyTestContext(
+        index=index, total=total, proxy=proxy, proxy_id=short_proxy_id(proxy), cfg=cfg
+    )
     task = asyncio.create_task(test_proxy_once(ctx, port_allocator, logger))
     try:
         return await asyncio.wait_for(task, timeout=cfg.per_proxy_timeout)
@@ -2129,13 +2377,20 @@ async def worker(
         async with stats_lock:
             stats.active += 1
         try:
-            return await test_proxy_with_timeout(index, total, proxy, cfg, port_allocator, logger)
+            return await test_proxy_with_timeout(
+                index, total, proxy, cfg, port_allocator, logger
+            )
         finally:
             async with stats_lock:
                 stats.active -= 1
 
 
-async def run_all(proxy_list: list[str], cfg: AppConfig, logger: logging.Logger, reporter: ConsoleReporter) -> tuple[list[TestResult], ProgressStats]:
+async def run_all(
+    proxy_list: list[str],
+    cfg: AppConfig,
+    logger: logging.Logger,
+    reporter: ConsoleReporter,
+) -> tuple[list[TestResult], ProgressStats]:
     semaphore = asyncio.Semaphore(cfg.threads)
     port_allocator = PortAllocator()
     output = OutputManager(cfg)
@@ -2148,11 +2403,30 @@ async def run_all(proxy_list: list[str], cfg: AppConfig, logger: logging.Logger,
         return last_result_box["last"]
 
     progress_task = asyncio.create_task(
-        progress_reporter(stats, stats_lock, stop_event, reporter, cfg.progress_interval, get_last_result)
+        progress_reporter(
+            stats,
+            stats_lock,
+            stop_event,
+            reporter,
+            cfg.progress_interval,
+            get_last_result,
+        )
     )
 
     tasks = [
-        asyncio.create_task(worker(i + 1, len(proxy_list), proxy, semaphore, cfg, port_allocator, logger, stats, stats_lock))
+        asyncio.create_task(
+            worker(
+                i + 1,
+                len(proxy_list),
+                proxy,
+                semaphore,
+                cfg,
+                port_allocator,
+                logger,
+                stats,
+                stats_lock,
+            )
+        )
         for i, proxy in enumerate(proxy_list)
     ]
 
@@ -2174,14 +2448,19 @@ async def run_all(proxy_list: list[str], cfg: AppConfig, logger: logging.Logger,
                     stats.connected += 1
                 if result.classification == Classification.UNKNOWN:
                     stats.unknown += 1
-                if result.classification in {Classification.DEAD, Classification.PARSE_FAILED}:
+                if result.classification in {
+                    Classification.DEAD,
+                    Classification.PARSE_FAILED,
+                }:
                     stats.failed += 1
                 if result.failure_category:
                     stats.category_counts[result.failure_category] += 1
                 if result.failure_reason:
                     stats.reason_counts[result.failure_reason[:500]] += 1
 
-                should_progress = stats.done % cfg.progress_every == 0 or stats.done == stats.total
+                should_progress = (
+                    stats.done % cfg.progress_every == 0 or stats.done == stats.total
+                )
 
             logger.info(
                 "result index=%s/%s id=%s mode=%s class=%s selected=%s connected=%s stage=%s category=%s reason=%s total_ms=%s endpoint=%s log_file=%s",
@@ -2211,19 +2490,309 @@ async def run_all(proxy_list: list[str], cfg: AppConfig, logger: logging.Logger,
     return results, stats
 
 
+# ---------- sort-by-ping and ping-only scan ----------
+
+
+def result_ping_ms(result: TestResult) -> Optional[float]:
+    """Best latency value for sorting full proxy-test results."""
+    if result.stage2 and result.stage2.avg_latency_ms is not None:
+        return result.stage2.avg_latency_ms
+    if result.latencies.http_time_ms is not None:
+        return result.latencies.http_time_ms
+    if result.latencies.total_time_ms is not None:
+        return result.latencies.total_time_ms
+    return None
+
+
+def write_sorted_selected_output(
+    cfg: AppConfig, results: list[TestResult]
+) -> dict[str, Any]:
+    """Write selected configs ordered by measured proxy latency."""
+    selected = [r for r in results if r.selected]
+    sorted_selected = sorted(
+        selected,
+        key=lambda r: (
+            result_ping_ms(r) is None,
+            result_ping_ms(r) if result_ping_ms(r) is not None else float("inf"),
+            r.index,
+        ),
+    )
+    cfg.output.parent.mkdir(parents=True, exist_ok=True)
+    mode = "a" if cfg.append else "w"
+    with open(cfg.output, mode, encoding="utf-8", errors="replace", newline="\n") as f:
+        for result in sorted_selected:
+            f.write(result.proxy + "\n")
+
+    latencies = [
+        result_ping_ms(r) for r in sorted_selected if result_ping_ms(r) is not None
+    ]
+    return {
+        "enabled": True,
+        "output": str(cfg.output),
+        "selected_written": len(sorted_selected),
+        "fastest_ms": min(latencies) if latencies else None,
+        "slowest_ms": max(latencies) if latencies else None,
+    }
+
+
+@dataclass
+class PingOnlyResult:
+    index: int
+    total: int
+    proxy: str
+    proxy_id: str
+    proxy_type: str = ""
+    host: str = ""
+    port: Optional[int] = None
+    success: bool = False
+    timed_out: bool = False
+    latency_ms: Optional[float] = None
+    reason: str = ""
+
+    def to_json_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+def ping_sort_key(result: PingOnlyResult) -> tuple[int, float, int]:
+    # Reachable configs first by latency. Non-timeout failures next. Timeouts last,
+    # so the reported timeout cliff is contiguous in the sorted output.
+    if result.success and result.latency_ms is not None:
+        return (0, result.latency_ms, result.index)
+    if result.timed_out:
+        return (2, float("inf"), result.index)
+    return (1, float("inf"), result.index)
+
+
+async def tcp_ping_config(
+    index: int, total: int, proxy: str, cfg: AppConfig
+) -> PingOnlyResult:
+    started = now_perf()
+    result = PingOnlyResult(
+        index=index, total=total, proxy=proxy, proxy_id=short_proxy_id(proxy)
+    )
+    try:
+        parsed = parse_proxy_url(proxy)
+        result.proxy_type = str(parsed.get("type", ""))
+        result.host = str(parsed["host"])
+        result.port = int(parsed["port"])
+    except Exception as exc:
+        result.reason = f"parse_failed: {type(exc).__name__}: {exc}"
+        return result
+
+    try:
+        reader, writer = await asyncio.wait_for(
+            asyncio.open_connection(result.host, int(result.port)),
+            timeout=cfg.ping_timeout,
+        )
+        writer.close()
+        await writer.wait_closed()
+        result.success = True
+        result.latency_ms = ms_since(started)
+        return result
+    except asyncio.TimeoutError:
+        result.timed_out = True
+        result.latency_ms = ms_since(started)
+        result.reason = f"timeout elapsed={cfg.ping_timeout:.2f}s"
+        return result
+    except Exception as exc:
+        result.latency_ms = ms_since(started)
+        result.reason = f"connect_failed: {type(exc).__name__}: {exc}"
+        return result
+
+
+async def run_ping_only(
+    proxy_list: list[str],
+    cfg: AppConfig,
+    logger: logging.Logger,
+    reporter: ConsoleReporter,
+) -> list[PingOnlyResult]:
+    semaphore = asyncio.Semaphore(cfg.threads)
+    results: list[PingOnlyResult] = []
+    done = 0
+    total = len(proxy_list)
+
+    async def one(index: int, proxy: str) -> PingOnlyResult:
+        async with semaphore:
+            return await tcp_ping_config(index, total, proxy, cfg)
+
+    tasks = [
+        asyncio.create_task(one(i + 1, proxy)) for i, proxy in enumerate(proxy_list)
+    ]
+    for fut in asyncio.as_completed(tasks):
+        result = await fut
+        results.append(result)
+        done += 1
+        if done % cfg.progress_every == 0 or done == total:
+            ok = sum(1 for r in results if r.success)
+            timed_out = sum(1 for r in results if r.timed_out)
+            if not cfg.quiet:
+                print(
+                    f"PING PROGRESS {done}/{total} | reachable={ok} | timeout={timed_out}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+        logger.info(
+            "ping_result index=%s/%s id=%s success=%s timeout=%s latency_ms=%s reason=%s",
+            result.index,
+            result.total,
+            result.proxy_id,
+            result.success,
+            result.timed_out,
+            fmt_ms(result.latency_ms),
+            result.reason,
+        )
+    return results
+
+
+def write_ping_only_outputs(
+    cfg: AppConfig, results: list[PingOnlyResult]
+) -> dict[str, Any]:
+    sorted_results = sorted(results, key=ping_sort_key)
+    cfg.output.parent.mkdir(parents=True, exist_ok=True)
+    mode = "a" if cfg.append else "w"
+    with open(cfg.output, mode, encoding="utf-8", errors="replace", newline="\n") as f:
+        for result in sorted_results:
+            f.write(result.proxy + "\n")
+
+    if cfg.jsonl_path:
+        cfg.jsonl_path.parent.mkdir(parents=True, exist_ok=True)
+        json_mode = "a" if cfg.append else "w"
+        with open(
+            cfg.jsonl_path, json_mode, encoding="utf-8", errors="replace", newline="\n"
+        ) as f:
+            for result in sorted_results:
+                f.write(json.dumps(result.to_json_dict(), ensure_ascii=False) + "\n")
+
+    if cfg.csv_path:
+        cfg.csv_path.parent.mkdir(parents=True, exist_ok=True)
+        csv_mode = "a" if cfg.append else "w"
+        fieldnames = [
+            "sorted_position",
+            "index",
+            "proxy_id",
+            "proxy",
+            "type",
+            "host",
+            "port",
+            "success",
+            "timed_out",
+            "latency_ms",
+            "reason",
+        ]
+        csv_exists = (
+            cfg.append and cfg.csv_path.exists() and cfg.csv_path.stat().st_size > 0
+        )
+        with open(
+            cfg.csv_path, csv_mode, encoding="utf-8", errors="replace", newline=""
+        ) as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            if not csv_exists:
+                writer.writeheader()
+            for pos, result in enumerate(sorted_results, start=1):
+                writer.writerow(
+                    {
+                        "sorted_position": pos,
+                        "index": result.index,
+                        "proxy_id": result.proxy_id,
+                        "proxy": result.proxy,
+                        "type": result.proxy_type,
+                        "host": result.host,
+                        "port": result.port if result.port is not None else "",
+                        "success": str(result.success),
+                        "timed_out": str(result.timed_out),
+                        "latency_ms": fmt_ms(result.latency_ms),
+                        "reason": result.reason,
+                    }
+                )
+
+    first_timeout_position = next(
+        (i for i, r in enumerate(sorted_results, start=1) if r.timed_out), None
+    )
+    reachable_latencies = [
+        r.latency_ms for r in sorted_results if r.success and r.latency_ms is not None
+    ]
+    return {
+        "output": str(cfg.output),
+        "total": len(sorted_results),
+        "reachable": sum(1 for r in sorted_results if r.success),
+        "timed_out": sum(1 for r in sorted_results if r.timed_out),
+        "failed_without_timeout": sum(
+            1 for r in sorted_results if not r.success and not r.timed_out
+        ),
+        "first_timeout_sorted_position": first_timeout_position,
+        "fastest_ms": min(reachable_latencies) if reachable_latencies else None,
+        "slowest_ms": max(reachable_latencies) if reachable_latencies else None,
+    }
+
+
+def build_ping_only_summary(
+    results: list[PingOnlyResult],
+    cfg: AppConfig,
+    elapsed_seconds: float,
+    output_info: dict[str, Any],
+) -> dict[str, Any]:
+    reason_counts = Counter(r.reason[:500] for r in results if r.reason)
+    return {
+        "mode": "ping-only",
+        "sort_ping": True,
+        "sort_ping_only": True,
+        "total": len(results),
+        "reachable": sum(1 for r in results if r.success),
+        "timed_out": sum(1 for r in results if r.timed_out),
+        "failed_without_timeout": sum(
+            1 for r in results if not r.success and not r.timed_out
+        ),
+        "first_timeout_sorted_position": output_info.get(
+            "first_timeout_sorted_position"
+        ),
+        "ping_timeout_seconds": cfg.ping_timeout,
+        "elapsed_seconds": elapsed_seconds,
+        "fastest_ms": output_info.get("fastest_ms"),
+        "slowest_ms": output_info.get("slowest_ms"),
+        "top_failure_reasons": dict(reason_counts.most_common(15)),
+        "outputs": {
+            "sorted_output": str(cfg.output),
+            "summary": str(cfg.summary_path),
+            "log_file": str(cfg.log_file) if cfg.log_file else None,
+            **({"jsonl": str(cfg.jsonl_path)} if cfg.jsonl_path else {}),
+            **({"csv": str(cfg.csv_path)} if cfg.csv_path else {}),
+        },
+    }
+
+
+def ordinal(n: int) -> str:
+    if 10 <= n % 100 <= 20:
+        suffix = "th"
+    else:
+        suffix = {1: "st", 2: "nd", 3: "rd"}.get(n % 10, "th")
+    return f"{n}{suffix}"
+
+
 # ---------- summary ----------
 
 
-def build_summary(results: list[TestResult], stats: ProgressStats, cfg: AppConfig, elapsed_seconds: float) -> dict[str, Any]:
+def build_summary(
+    results: list[TestResult],
+    stats: ProgressStats,
+    cfg: AppConfig,
+    elapsed_seconds: float,
+) -> dict[str, Any]:
     total = len(results)
     class_counts = Counter(r.classification.value for r in results)
     category_counts = Counter(r.failure_category for r in results if r.failure_category)
     reason_counts = Counter(r.failure_reason[:500] for r in results if r.failure_reason)
     connected = sum(1 for r in results if r.connected)
     selected = sum(1 for r in results if r.selected)
-    failed = class_counts[Classification.DEAD.value] + class_counts[Classification.PARSE_FAILED.value]
+    failed = (
+        class_counts[Classification.DEAD.value]
+        + class_counts[Classification.PARSE_FAILED.value]
+    )
     unknown = class_counts[Classification.UNKNOWN.value]
-    avg_latency_ms = sum((r.latencies.total_time_ms or 0.0) for r in results) / total if total else 0.0
+    avg_latency_ms = (
+        sum((r.latencies.total_time_ms or 0.0) for r in results) / total
+        if total
+        else 0.0
+    )
 
     outputs: dict[str, Any] = {
         "selected_output": str(cfg.output),
@@ -2239,12 +2808,16 @@ def build_summary(results: list[TestResult], stats: ProgressStats, cfg: AppConfi
     if cfg.csv_path:
         outputs["csv"] = str(cfg.csv_path)
     if cfg.save_buckets:
-        outputs["buckets"] = [str(cfg.output.parent / f"{c.value.lower()}.txt") for c in Classification]
+        outputs["buckets"] = [
+            str(cfg.output.parent / f"{c.value.lower()}.txt") for c in Classification
+        ]
     if cfg.per_proxy_logs:
         outputs["proxy_log_dir"] = str(cfg.proxy_log_dir)
 
     return {
-        "mode": cfg.mode.value,
+        "mode": "ping-only" if cfg.sort_ping_only else cfg.mode.value,
+        "sort_ping": cfg.sort_ping,
+        "sort_ping_only": cfg.sort_ping_only,
         "total": total,
         "tested": total,
         "selected": selected,
@@ -2279,9 +2852,17 @@ def write_summary(path: Path, summary: dict[str, Any]) -> None:
 def read_proxy_lines(path: Optional[Path]) -> list[str]:
     if path:
         with open(path, "r", encoding="utf-8", errors="replace") as f:
-            return [line for line in (normalize_input_line(line) for line in f) if line and not line.startswith("#")]
+            return [
+                line
+                for line in (normalize_input_line(line) for line in f)
+                if line and not line.startswith("#")
+            ]
     print("Enter proxy URLs (one per line, Ctrl+D to finish):", file=sys.stderr)
-    return [line for line in (normalize_input_line(line) for line in sys.stdin) if line and not line.startswith("#")]
+    return [
+        line
+        for line in (normalize_input_line(line) for line in sys.stdin)
+        if line and not line.startswith("#")
+    ]
 
 
 def parse_args(argv: Optional[Iterable[str]] = None) -> AppConfig:
@@ -2289,46 +2870,169 @@ def parse_args(argv: Optional[Iterable[str]] = None) -> AppConfig:
         description="Merged VLESS/VMess/Trojan/Shadowsocks proxy probe with fast, balanced, strict, and diagnose modes.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    parser.add_argument("-f", "--file", type=Path, help="File containing proxy URLs, one per line.")
-    parser.add_argument("--mode", choices=[m.value for m in Mode], default=Mode.FAST.value, help="Testing profile.")
-    parser.add_argument("--threads", type=int, help="Concurrent proxy tests. Defaults depend on --mode.")
-    parser.add_argument("--startup-timeout", type=float, help="Seconds to wait for local SOCKS readiness. Defaults depend on --mode.")
-    parser.add_argument("--test-timeout", type=float, help="HTTP request timeout in seconds. Defaults depend on --mode.")
-    parser.add_argument("--per-proxy-timeout", type=float, help="Overall timeout per proxy in seconds. Defaults depend on --mode.")
+    parser.add_argument(
+        "-f", "--file", type=Path, help="File containing proxy URLs, one per line."
+    )
+    parser.add_argument(
+        "--mode",
+        choices=[m.value for m in Mode],
+        default=None,
+        help="Testing profile. If omitted with --sort-ping, only server TCP pings are checked.",
+    )
+    parser.add_argument(
+        "--threads", type=int, help="Concurrent proxy tests. Defaults depend on --mode."
+    )
+    parser.add_argument(
+        "--startup-timeout",
+        type=float,
+        help="Seconds to wait for local SOCKS readiness. Defaults depend on --mode.",
+    )
+    parser.add_argument(
+        "--test-timeout",
+        type=float,
+        help="HTTP request timeout in seconds. Defaults depend on --mode.",
+    )
+    parser.add_argument(
+        "--per-proxy-timeout",
+        type=float,
+        help="Overall timeout per proxy in seconds. Defaults depend on --mode.",
+    )
 
-    parser.add_argument("--output", type=Path, default=Path("connected.txt"), help="Selected configs output file.")
-    parser.add_argument("--summary", dest="summary_path", type=Path, default=Path("summary.json"), help="Summary JSON output.")
-    parser.add_argument("--log-file", type=Path, default=Path("proxy_probe.log"), help="Run log file.")
-    parser.add_argument("--no-log-file", action="store_true", help="Disable run log file.")
-    parser.add_argument("--quiet", action="store_true", help="No console progress/output except fatal startup errors.")
-    parser.add_argument("--no-color", action="store_true", help="Disable colored console output.")
+    parser.add_argument(
+        "--output",
+        type=Path,
+        default=Path("connected.txt"),
+        help="Selected configs output file.",
+    )
+    parser.add_argument(
+        "--summary",
+        dest="summary_path",
+        type=Path,
+        default=Path("summary.json"),
+        help="Summary JSON output.",
+    )
+    parser.add_argument(
+        "--log-file", type=Path, default=Path("proxy_probe.log"), help="Run log file."
+    )
+    parser.add_argument(
+        "--no-log-file", action="store_true", help="Disable run log file."
+    )
+    parser.add_argument(
+        "--quiet",
+        action="store_true",
+        help="No console progress/output except fatal startup errors.",
+    )
+    parser.add_argument(
+        "--no-color", action="store_true", help="Disable colored console output."
+    )
 
-    parser.add_argument("--save-failed", type=Path, help="Save definitely failed configs here.")
-    parser.add_argument("--save-unknown", type=Path, help="Save inconclusive timeout/unstable configs here.")
-    parser.add_argument("--save-buckets", action="store_true", help="Create good/slow/partial/unstable/dead/unknown/parse_failed bucket files.")
-    parser.add_argument("--jsonl", dest="jsonl_path", type=Path, help="Detailed JSONL result file.")
-    parser.add_argument("--csv", dest="csv_path", type=Path, help="Detailed CSV result file.")
-    parser.add_argument("--per-proxy-logs", action="store_true", help="Create proxy_logs/ with Xray/ss-local output per config.")
-    parser.add_argument("--proxy-log-dir", type=Path, default=Path("proxy_logs"), help="Directory for --per-proxy-logs.")
+    parser.add_argument(
+        "--save-failed", type=Path, help="Save definitely failed configs here."
+    )
+    parser.add_argument(
+        "--save-unknown",
+        type=Path,
+        help="Save inconclusive timeout/unstable configs here.",
+    )
+    parser.add_argument(
+        "--save-buckets",
+        action="store_true",
+        help="Create good/slow/partial/unstable/dead/unknown/parse_failed bucket files.",
+    )
+    parser.add_argument(
+        "--jsonl", dest="jsonl_path", type=Path, help="Detailed JSONL result file."
+    )
+    parser.add_argument(
+        "--csv", dest="csv_path", type=Path, help="Detailed CSV result file."
+    )
+    parser.add_argument(
+        "--per-proxy-logs",
+        action="store_true",
+        help="Create proxy_logs/ with Xray/ss-local output per config.",
+    )
+    parser.add_argument(
+        "--proxy-log-dir",
+        type=Path,
+        default=Path("proxy_logs"),
+        help="Directory for --per-proxy-logs.",
+    )
 
-    parser.add_argument("--debug", action="store_true", help="Enable debug run logs and Xray debug loglevel.")
-    parser.add_argument("--progress-interval", type=float, default=DEFAULT_PROGRESS_INTERVAL, help="Seconds between progress summaries.")
-    parser.add_argument("--progress-every", type=int, default=DEFAULT_PROGRESS_EVERY, help="Also print a loud progress summary every N completed configs.")
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="Enable debug run logs and Xray debug loglevel.",
+    )
+    parser.add_argument(
+        "--progress-interval",
+        type=float,
+        default=DEFAULT_PROGRESS_INTERVAL,
+        help="Seconds between progress summaries.",
+    )
+    parser.add_argument(
+        "--progress-every",
+        type=int,
+        default=DEFAULT_PROGRESS_EVERY,
+        help="Also print a loud progress summary every N completed configs.",
+    )
     parser.add_argument("--xray-bin", default="xray", help="Xray executable path/name.")
-    parser.add_argument("--ss-bin", default="ss-local", help="Shadowsocks local client executable path/name.")
-    parser.add_argument("--fsync-output", action="store_true", help="fsync after each output write; safer but slower.")
-    parser.add_argument("--append", action="store_true", help="Append to output files instead of overwriting them.")
-    parser.add_argument("--slow-threshold-ms", type=float, default=DEFAULT_SLOW_THRESHOLD_MS, help="Latency above this is SLOW_BUT_WORKING.")
-    parser.add_argument("--test-url", dest="test_urls", action="append", help="Override/add HTTP validation URL. Can be repeated.")
+    parser.add_argument(
+        "--ss-bin",
+        default="ss-local",
+        help="Shadowsocks local client executable path/name.",
+    )
+    parser.add_argument(
+        "--fsync-output",
+        action="store_true",
+        help="fsync after each output write; safer but slower.",
+    )
+    parser.add_argument(
+        "--append",
+        action="store_true",
+        help="Append to output files instead of overwriting them.",
+    )
+    parser.add_argument(
+        "--sort-ping",
+        action="store_true",
+        help="Write selected configs sorted by measured ping. If --mode is omitted, run a ping-only TCP reachability scan instead of a full proxy test.",
+    )
+    parser.add_argument(
+        "--ping-timeout",
+        type=float,
+        default=5.0,
+        help="Seconds to wait for each TCP ping in --sort-ping ping-only mode.",
+    )
+    parser.add_argument(
+        "--slow-threshold-ms",
+        type=float,
+        default=DEFAULT_SLOW_THRESHOLD_MS,
+        help="Latency above this is SLOW_BUT_WORKING.",
+    )
+    parser.add_argument(
+        "--test-url",
+        dest="test_urls",
+        action="append",
+        help="Override/add HTTP validation URL. Can be repeated.",
+    )
 
     ns = parser.parse_args(argv)
-    mode = Mode(ns.mode)
+    mode_was_provided = ns.mode is not None
+    mode = Mode(ns.mode) if mode_was_provided else Mode.FAST
     defaults = MODE_DEFAULTS[mode]
 
     threads = ns.threads if ns.threads is not None else defaults.threads
-    startup_timeout = ns.startup_timeout if ns.startup_timeout is not None else defaults.startup_timeout
-    test_timeout = ns.test_timeout if ns.test_timeout is not None else defaults.test_timeout
-    per_proxy_timeout = ns.per_proxy_timeout if ns.per_proxy_timeout is not None else defaults.per_proxy_timeout
+    startup_timeout = (
+        ns.startup_timeout
+        if ns.startup_timeout is not None
+        else defaults.startup_timeout
+    )
+    test_timeout = (
+        ns.test_timeout if ns.test_timeout is not None else defaults.test_timeout
+    )
+    per_proxy_timeout = (
+        ns.per_proxy_timeout
+        if ns.per_proxy_timeout is not None
+        else defaults.per_proxy_timeout
+    )
 
     if threads <= 0:
         parser.error("--threads must be > 0")
@@ -2338,6 +3042,10 @@ def parse_args(argv: Optional[Iterable[str]] = None) -> AppConfig:
         parser.error("--progress-every must be > 0")
     if ns.slow_threshold_ms <= 0:
         parser.error("--slow-threshold-ms must be > 0")
+    if ns.ping_timeout <= 0:
+        parser.error("--ping-timeout must be > 0")
+
+    sort_ping_only = bool(ns.sort_ping and not mode_was_provided)
 
     return AppConfig(
         input_file=ns.file,
@@ -2367,6 +3075,9 @@ def parse_args(argv: Optional[Iterable[str]] = None) -> AppConfig:
         test_urls=ns.test_urls or BASIC_TEST_URLS,
         slow_threshold_ms=ns.slow_threshold_ms,
         append=ns.append,
+        sort_ping=ns.sort_ping,
+        sort_ping_only=sort_ping_only,
+        ping_timeout=ns.ping_timeout,
     )
 
 
@@ -2376,9 +3087,11 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
     logger = setup_file_logger(cfg)
     reporter = ConsoleReporter(cfg)
 
-    if IMPORT_ERROR is not None:
+    if IMPORT_ERROR is not None and not cfg.sort_ping_only:
         print(f"Missing required Python dependency: {IMPORT_ERROR}", file=sys.stderr)
-        print("Install dependencies: pip install aiohttp aiohttp-socks", file=sys.stderr)
+        print(
+            "Install dependencies: pip install aiohttp aiohttp-socks", file=sys.stderr
+        )
         return 2
 
     try:
@@ -2392,8 +3105,8 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
         return 1
 
     logger.info(
-        "START mode=%s total=%s threads=%s startup_timeout=%.1fs test_timeout=%.1fs per_proxy_timeout=%.1fs output=%s summary=%s log_file=%s quiet=%s debug=%s",
-        cfg.mode.value,
+        "START mode=%s total=%s threads=%s startup_timeout=%.1fs test_timeout=%.1fs per_proxy_timeout=%.1fs output=%s summary=%s log_file=%s quiet=%s debug=%s sort_ping=%s sort_ping_only=%s",
+        "ping-only" if cfg.sort_ping_only else cfg.mode.value,
         len(proxy_urls),
         cfg.threads,
         cfg.startup_timeout,
@@ -2404,8 +3117,45 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
         cfg.log_file,
         cfg.quiet,
         cfg.debug,
+        cfg.sort_ping,
+        cfg.sort_ping_only,
     )
     reporter.start(len(proxy_urls))
+
+    if cfg.sort_ping_only:
+        started_ping = now_perf()
+        try:
+            ping_results = asyncio.run(run_ping_only(proxy_urls, cfg, logger, reporter))
+        except KeyboardInterrupt:
+            logger.warning("Interrupted by user during ping-only scan")
+            return 130
+        except Exception as exc:
+            logger.exception("Fatal error: %s", exc)
+            print(f"Fatal error: {type(exc).__name__}: {exc}", file=sys.stderr)
+            return 2
+
+        elapsed_ping = time.perf_counter() - started_ping
+        output_info = write_ping_only_outputs(cfg, ping_results)
+        summary = build_ping_only_summary(ping_results, cfg, elapsed_ping, output_info)
+        write_summary(cfg.summary_path, summary)
+        logger.info("SUMMARY %s", json.dumps(summary, ensure_ascii=False))
+
+        if not cfg.quiet:
+            print(f"output file sorted {cfg.output}", file=sys.stderr, flush=True)
+            first_timeout = output_info.get("first_timeout_sorted_position")
+            if first_timeout is None:
+                print(
+                    "no timeout cliff found in the sorted configurations",
+                    file=sys.stderr,
+                    flush=True,
+                )
+            else:
+                print(
+                    f"from {ordinal(int(first_timeout))} configuration, configs connections dies because of timeout :(",
+                    file=sys.stderr,
+                    flush=True,
+                )
+        return 0
 
     started = now_perf()
     results: list[TestResult] = []
@@ -2427,6 +3177,10 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
 
     elapsed = time.perf_counter() - started
     summary = build_summary(results, stats, cfg, elapsed)
+    if cfg.sort_ping:
+        summary["sort_ping_output"] = write_sorted_selected_output(cfg, results)
+        if not cfg.quiet:
+            print(f"output file sorted {cfg.output}", file=sys.stderr, flush=True)
     write_summary(cfg.summary_path, summary)
     logger.info("SUMMARY %s", json.dumps(summary, ensure_ascii=False))
     reporter.final(summary)
